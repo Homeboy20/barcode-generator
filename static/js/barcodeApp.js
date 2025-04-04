@@ -46,26 +46,39 @@ document.addEventListener('DOMContentLoaded', function() {
     // Check rate limits on page load
     checkRateLimits();
     
-    // Set up periodic rate limit checks (every 60 seconds)
-    setInterval(checkRateLimits, 60000);
+    // Set up periodic rate limit checks (every 5 minutes)
+    setInterval(checkRateLimits, 300000);
     
     // Rate limit indicator functions
     function checkRateLimits() {
-        fetch('/api/rate_limit_status')
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error('Failed to fetch rate limit status');
-                }
-                return response.json();
-            })
-            .then(data => {
-                if (data.status === 'success') {
-                    updateRateLimitIndicators(data);
-                }
-            })
-            .catch(error => {
-                console.warn('[Rate Limit] Failed to check rate limits:', error);
-            });
+        // Wrap in try/catch to prevent unhandled rejections
+        try {
+            return fetch('/api/rate_limit_status')
+                .then(response => {
+                    if (!response.ok) {
+                        if (response.status === 429) {
+                            // Handle rate limit exceeded gracefully
+                            console.warn('[Rate Limit] Rate limit exceeded. Some features may be temporarily unavailable.');
+                            updateRateLimitUI(true);
+                            return { exceeded: true };
+                        }
+                        throw new Error('Failed to fetch rate limit status');
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    updateRateLimitUI(data.exceeded);
+                    return data;
+                })
+                .catch(error => {
+                    console.warn('[Rate Limit] Failed to check rate limits:', error);
+                    // Don't update UI on network errors to avoid false positives
+                    return { exceeded: false, error: true };
+                });
+        } catch (e) {
+            console.error('[Rate Limit] Error in rate limit check:', e);
+            return Promise.resolve({ exceeded: false, error: true });
+        }
     }
     
     // Add loadAnalytics function if it's missing

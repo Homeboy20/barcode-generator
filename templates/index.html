@@ -2244,7 +2244,8 @@
         .then(function(response) {
           console.log('QR Code response received after', Date.now() - startTime, 'ms:', response.data);
           
-          if (!response.data || !response.data.id) {
+          // Modified validation logic - don't require id to be non-zero
+          if (!response.data || response.data.id === undefined || !response.data.image_data) {
             console.error('Invalid server response:', response.data);
             throw new Error('Invalid response from server');
           }
@@ -2327,16 +2328,16 @@
           }
 
           // Set the image
-          if (qrId < 0 && response.data.image_data) {
-            // For temporary QR codes with negative IDs, use the image_data (base64) directly
+          if (qrId === 0 && response.data.image_data) {
+            // For temporary QR codes with ID 0, use the image_data (base64) directly
             document.getElementById('qr-img').src = response.data.image_data;
             document.getElementById('qr-download-link').href = response.data.image_data;
             document.getElementById('qr-download-link').download = `qrcode_temp_${Date.now()}.png`;
           } else {
             // For saved QR codes, use the URL with download parameter
-          const qrUrl = `/qrcode/${qrId}`;
+            const qrUrl = `/qrcode/${qrId}`;
             const downloadUrl = `${qrUrl}?download=true`;
-          document.getElementById('qr-img').src = qrUrl;
+            document.getElementById('qr-img').src = qrUrl;
             document.getElementById('qr-download-link').href = downloadUrl;
           }
           

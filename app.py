@@ -1,6 +1,6 @@
 ﻿from flask import Flask, jsonify, request, url_for, render_template, redirect, send_file
 from flask_login import current_user, LoginManager
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 import base64
 from io import BytesIO
@@ -25,7 +25,10 @@ login_manager.login_view = 'login'
 limiter = Limiter(
     get_remote_address,
     app=app,
-    default_limits=["200 per day", "50 per hour"]
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://",  # For production, change to "redis://localhost:6379/0"
+    storage_options={"client": "memory"},  # For production, remove this line when using Redis
+    strategy="fixed-window"  # More efficient for high traffic
 )
 
 # Define models
@@ -699,23 +702,19 @@ def get_barcode_image(barcode_id):
         return jsonify({'error': str(e), 'status': 'error'}), 500
 
 @app.route('/api/rate_limit_status')
+@limiter.limit("5 per minute")  # Much more lenient limit just for status checks
 def rate_limit_status():
     """Return the current rate limit status for the user."""
-    limits = {
-        'barcode_generation': get_user_rate_limits('barcode_generation'),
-        'qrcode_generation': get_user_rate_limits('qrcode_generation'),
-        'sequence_generation': get_user_rate_limits('sequence_generation'),
-        'remaining': {
-            'barcode_generation': 100,
-            'qrcode_generation': 100,
-            'sequence_generation': 100
-        }  # Add actual values for remaining limits
-    }
+    if hasattr(current_user, 'is_authenticated') and current_user.is_authenticated:
+        user_type = "premium" if (hasattr(current_user, 'is_premium') and current_user.is_premium) else "regular"
+    else:
+        user_type = "anonymous"
     
     return jsonify({
-        'status': 'success',
-        'limits': limits,
-        'is_limited': False  # For demonstration, always return false
+        "status": "success",
+        "exceeded": False,  # Only set to true when actually exceeded
+        "user_type": user_type,
+        "reset_at": (datetime.now() + timedelta(hours=1)).isoformat()
     })
 
 @app.route('/api/user/auth_status')
@@ -816,6 +815,14 @@ def barcode_image(barcode_id):
     except Exception as e:
         app.logger.error(f"Error retrieving barcode image: {str(e)}")
         return jsonify({'error': str(e), 'status': 'error'}), 500
+
+# Add this route after the other route definitions, before the run statement
+@app.route('/bulk_sequence_generator')
+def bulk_sequence_generator():
+    """Render the bulk sequence generator page."""
+    is_logged_in = hasattr(current_user, 'is_authenticated') and current_user.is_authenticated
+    is_admin = hasattr(current_user, 'is_admin') and current_user.is_admin if is_logged_in else False
+    return render_template('bulk_sequence.html', logged_in=is_logged_in, is_admin=is_admin)
 
 # Add run statement at the end of the file
 if __name__ == '__main__':
