@@ -824,6 +824,248 @@ def bulk_sequence_generator():
     is_admin = hasattr(current_user, 'is_admin') and current_user.is_admin if is_logged_in else False
     return render_template('bulk_sequence.html', logged_in=is_logged_in, is_admin=is_admin)
 
+# Add this route before the final run statement
+@app.route('/api/generate_bulk_sequence', methods=['POST'])
+@limiter.limit(lambda: get_user_rate_limits('sequence_generation'))
+def generate_bulk_sequence():
+    """API endpoint for generating bulk sequences of barcodes."""
+    app.logger.info(f"Bulk Sequence Request content type: {request.content_type}")
+    
+    try:
+        # Extract request data
+        form_defaults = {
+            'prefix': '',
+            'start': '1',
+            'count': '100',
+            'barcode_type': 'code128',
+            'suffix': '',
+            'pad_length': '0',
+            'batch_size': '10',
+            'metadata': {},
+            'save_to_system': 'false',
+        }
+        data = extract_request_data(request, form_defaults)
+        
+        # Extract and convert values
+        prefix = data.get('prefix', '')
+        suffix = data.get('suffix', '')
+        barcode_type = data.get('barcode_type', 'code128')
+        metadata = data.get('metadata', {})
+        
+        # Convert numeric values
+        try:
+            start = int(data.get('start', '1'))
+        except (ValueError, TypeError):
+            start = 1
+            
+        try:
+            count = int(data.get('count', '100'))
+        except (ValueError, TypeError):
+            count = 100
+            
+        try:
+            pad_length = int(data.get('pad_length', '0'))
+        except (ValueError, TypeError):
+            pad_length = 0
+            
+        try:
+            batch_size = int(data.get('batch_size', '10'))
+            batch_size = min(batch_size, 50)  # Limit batch size to 50 for performance
+        except (ValueError, TypeError):
+            batch_size = 10
+        
+        # Check if user is logged in
+        save_to_account = current_user.is_authenticated if hasattr(current_user, 'is_authenticated') else False
+        
+        # Check if save_to_system is requested and convert to boolean
+        save_to_system = data.get('save_to_system', 'false')
+        if isinstance(save_to_system, str):
+            save_to_system = save_to_system.lower() == 'true'
+        
+        # Only save if user is logged in
+        save_to_system = save_to_system and save_to_account
+            
+        app.logger.info(f"Processed Bulk Sequence request - prefix: {prefix}, start: {start}, count: {count}, pad: {pad_length}, type: {barcode_type}, save: {save_to_system}, batch: {batch_size}")
+        
+        # Validate input
+        if count <= 0 or count > 5000:
+            app.logger.warning(f"Invalid sequence count: {count}")
+            return jsonify({'error': 'Count must be between 1 and 5000', 'status': 'error'}), 400
+        
+        if pad_length < 0 or pad_length > 20:
+            app.logger.warning(f"Invalid padding length: {pad_length}")
+            return jsonify({'error': 'Padding length must be between 0 and 20', 'status': 'error'}), 400
+
+        # Generate barcodes
+        barcode_ids = []
+        barcode_data_list = []
+        barcode_images = []
+        failed_barcodes = []
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        
+        # User ID
+        user_id = current_user.id if save_to_account else None
+        
+        # Generate encryption key if needed and saving to account
+        encryption_key = None
+        if save_to_account and save_to_system:
+            if not current_user.encryption_key:
+                current_user.generate_encryption_key()
+                db.session.commit()
+            encryption_key = current_user.encryption_key
+        
+        # For bulk generation, we process in batches for better performance
+        total_generated = 0
+        
+        for batch_start in range(0, count, batch_size):
+            batch_end = min(batch_start + batch_size, count)
+            batch_count = batch_end - batch_start
+            
+            for i in range(batch_count):
+                current_number = start + batch_start + i
+                
+                # Apply zero-padding if needed
+                if pad_length > 0:
+                    number_str = str(current_number).zfill(pad_length)
+                else:
+                    number_str = str(current_number)
+                
+                # Special handling for EAN and UPC barcode types
+                if barcode_type == 'ean13' and prefix == '' and suffix == '':
+                    # For standalone EAN-13, pad to 12 digits (13th is check digit)
+                    if len(number_str) < 12:
+                        number_str = number_str.zfill(12)
+                elif barcode_type == 'ean8' and prefix == '' and suffix == '':
+                    # For standalone EAN-8, pad to 7 digits (8th is check digit)
+                    if len(number_str) < 7:
+                        number_str = number_str.zfill(7)
+                elif barcode_type == 'upca' and prefix == '' and suffix == '':
+                    # For standalone UPC-A, pad to 11 digits (12th is check digit)
+                    if len(number_str) < 11:
+                        number_str = number_str.zfill(11)
+                    
+                barcode_data = f"{prefix}{number_str}{suffix}"
+                filename = f"{barcode_type}_{timestamp}_{batch_start + i}.png"
+                
+                # Validate the barcode data
+                valid, error_message = validate_barcode_data(barcode_data, barcode_type)
+                if not valid:
+                    failed_barcodes.append({
+                        'index': batch_start + i,
+                        'data': barcode_data,
+                        'error': error_message
+                    })
+                    continue
+                
+                if save_to_system:
+                    # Create the barcode record
+                    new_barcode = Barcode(
+                        data=barcode_data,
+                        barcode_type=barcode_type,
+                        filename=filename,
+                        is_dynamic=False,
+                        user_id=user_id
+                    )
+                    
+                    # Add metadata if provided
+                    if metadata:
+                        try:
+                            if hasattr(new_barcode, 'set_metadata'):
+                                new_barcode.set_metadata(metadata)
+                        except Exception as meta_error:
+                            app.logger.warning(f"Error storing metadata: {str(meta_error)}")
+                    
+                    # Encrypt data if user is logged in
+                    if save_to_account and encryption_key:
+                        if hasattr(new_barcode, 'encrypt_data'):
+                            new_barcode.encrypt_data(encryption_key)
+                    
+                    db.session.add(new_barcode)
+                    barcode_ids.append(new_barcode)
+                    barcode_data_list.append(barcode_data)
+                else:
+                    # For temporary barcodes, generate images and return base64 data
+                    unique_id = str(uuid.uuid4())
+                    img_io = BytesIO()
+                    
+                    try:
+                        buffer, gen_error = generate_barcode_image(
+                            barcode_data, barcode_type, False, unique_id, img_io
+                        )
+                        
+                        if gen_error:
+                            app.logger.warning(f"Warning generating barcode: {gen_error}")
+                        
+                        if buffer:
+                            buffer.seek(0)
+                            img_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                            
+                            barcode_images.append({
+                                'id': f"temp_{batch_start + i}",
+                                'data': barcode_data,
+                                'barcode_type': barcode_type,
+                                'image_data': f"data:image/png;base64,{img_b64}"
+                            })
+                        else:
+                            raise Exception("Failed to generate barcode image")
+                    except Exception as img_error:
+                        app.logger.error(f"Error generating image: {str(img_error)}")
+                        failed_barcodes.append({
+                            'index': batch_start + i,
+                            'data': barcode_data,
+                            'error': f"Image generation failed: {str(img_error)}"
+                        })
+            
+            # If saving barcodes, commit after each batch to avoid long transactions
+            if save_to_system and barcode_ids:
+                try:
+                    db.session.commit()
+                    app.logger.info(f"Committed batch of {len(barcode_ids)} barcodes")
+                except Exception as db_error:
+                    app.logger.error(f"Error committing batch: {str(db_error)}")
+                    db.session.rollback()
+                    return jsonify({
+                        'error': f"Database error: {str(db_error)}",
+                        'status': 'error'
+                    }), 500
+            
+            total_generated += len(barcode_images) if not save_to_system else len(barcode_ids)
+        
+        if save_to_system:
+            # Prepare sequence info for response
+            sequence_info = []
+            for i, barcode in enumerate(barcode_ids):
+                sequence_info.append({
+                    'id': barcode.id,
+                    'data': barcode.data,
+                    'barcode_type': barcode.barcode_type,
+                    'image_url': url_for('get_barcode_image', barcode_id=barcode.id, _external=True)
+                })
+            
+            return jsonify({
+                'status': 'success',
+                'message': f'Generated and saved {len(barcode_ids)} barcodes',
+                'barcodes': sequence_info,
+                'failed': failed_barcodes if failed_barcodes else None
+            })
+        else:
+            # For non-logged in users, return the temporary barcode images
+            app.logger.info(f"Generated {len(barcode_images)} temporary barcodes in bulk sequence")
+            
+            return jsonify({
+                'status': 'success',
+                'message': f'Generated {len(barcode_images)} temporary barcodes',
+                'barcodes': barcode_images,
+                'failed': failed_barcodes if failed_barcodes else None,
+                'saved': False
+            })
+    
+    except Exception as e:
+        app.logger.error(f"General error in bulk sequence generation: {str(e)}")
+        return jsonify({'error': str(e), 'status': 'error'}), 500
+
+csrf.exempt(generate_bulk_sequence)
+
 # Add run statement at the end of the file
 if __name__ == '__main__':
     app.run(debug=True) 

@@ -234,7 +234,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 body: JSON.stringify({
                     range_string: rangeString,
                     barcode_type: barcodeType,
-                    save_to_system: true
+                    save_to_system: isUserLoggedIn
                 })
             })
             .then(response => {
@@ -245,15 +245,34 @@ document.addEventListener('DOMContentLoaded', function() {
             })
             .then(data => {
                 console.log('API response:', data);
-                if (data.success) {
-                    displayResults(data);
+                if (data.status === 'success') {
+                    // Check if barcodes are in the response
+                    if (data.barcodes && data.barcodes.length > 0) {
+                        // Format the data for the displayResults function
+                        const formattedData = {
+                            total_barcodes: data.barcodes.length,
+                            sequences: [
+                                {
+                                    prefix: '',
+                                    suffix: '',
+                                    start: 1,
+                                    count: data.barcodes.length,
+                                    barcodes: data.barcodes,
+                                    direction: 1
+                                }
+                            ]
+                        };
+                        displayResults(formattedData);
+                    } else {
+                        showError('No barcodes were generated');
+                    }
                 } else {
                     showError(data.error || 'Failed to generate barcodes');
                 }
             })
             .catch(error => {
                 console.error('Error generating sequences:', error);
-                showError('Failed to generate barcodes');
+                showError('Failed to generate barcodes: ' + error.message);
             });
             return;
         }
@@ -290,7 +309,7 @@ document.addEventListener('DOMContentLoaded', function() {
             },
             body: JSON.stringify({
                 sequences: sequenceBatch,
-                save_to_system: true
+                save_to_system: isUserLoggedIn
             })
         })
         .then(response => {
@@ -300,15 +319,35 @@ document.addEventListener('DOMContentLoaded', function() {
             return response.json();
         })
         .then(data => {
-            if (data.success) {
-                displayResults(data);
+            // The API returns status 'success' instead of a boolean success property
+            if (data.status === 'success') {
+                // Check if barcodes are in the response
+                if (data.barcodes && data.barcodes.length > 0) {
+                    // Format the data for the displayResults function
+                    const formattedData = {
+                        total_barcodes: data.barcodes.length,
+                        sequences: [
+                            {
+                                prefix: sequenceBatch[0].prefix,
+                                suffix: sequenceBatch[0].suffix,
+                                start: sequenceBatch[0].start,
+                                count: data.barcodes.length,
+                                barcodes: data.barcodes,
+                                direction: 1
+                            }
+                        ]
+                    };
+                    displayResults(formattedData);
+                } else {
+                    showError('No barcodes were generated');
+                }
             } else {
                 showError(data.error || 'Failed to generate barcodes');
             }
         })
         .catch(error => {
             console.error('Error generating sequences:', error);
-            showError('Failed to generate barcodes');
+            showError('Failed to generate barcodes: ' + error.message);
         });
     }
     
@@ -364,14 +403,20 @@ document.addEventListener('DOMContentLoaded', function() {
             
             // Add each barcode in this sequence
             sequence.barcodes.forEach(barcode => {
+                // If barcode has image_data (base64), use that directly
+                // If it has image_url, use that instead
+                const imageSource = barcode.image_data || barcode.image_url;
+                const downloadUrl = barcode.image_data || barcode.image_url;
+                const barcodeId = barcode.id || `temp_${Math.random().toString(36).substr(2, 9)}`;
+                
                 html += `
                     <div class="barcode-item border border-gray-200 dark:border-gray-700 rounded-md p-3">
                         <div class="barcode-data text-sm text-center mb-2 font-mono">${barcode.data}</div>
                         <div class="barcode-image flex justify-center">
-                            <img src="${barcode.image_url}" alt="Barcode: ${barcode.data}" class="max-w-full h-auto">
+                            <img src="${imageSource}" alt="Barcode: ${barcode.data}" class="max-w-full h-auto">
                         </div>
                         <div class="barcode-actions mt-2 text-center">
-                            <a href="${barcode.image_url}" download="barcode_${barcode.id}.png" class="text-blue-500 hover:text-blue-700 text-sm">
+                            <a href="${downloadUrl}" download="barcode_${barcodeId}.png" class="text-blue-500 hover:text-blue-700 text-sm">
                                 <i class="fas fa-download mr-1"></i> Download
                             </a>
                         </div>
